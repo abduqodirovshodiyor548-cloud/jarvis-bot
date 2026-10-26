@@ -59,7 +59,8 @@ Tuzilma: asosiy xulosa 2-3 gapda; nima ishlayapti va nima ishlamayapti; keyingi 
 
 Telegram'da o'qish qulay bo'lsin: jadval o'rniga raqamlangan bandlar ishlat, markdown belgilarini (**, ##) ishlatma.
 
-Shodiyor yuklagan fayllar suhbat boshida beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
+Maktab hujjatlaridan savolga mos parchalar savol bilan birga <hujjat> teglarida beriladi,
+Shodiyor Telegram'da yuklagan fayllar esa suhbat boshida beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
 va qaysi fayldan olganingni ayt. Faylda javob bo'lmasa, "fayllarda topilmadi" deb ochiq ayt.
 Faqat so'ralgan aniq javobni ber (raqam, narx, ism, sana yoki kerakli band). Faylni yoki uning katta qismini
 ko'chirib berma, "faylga qarang" dema: o'zing topib, qisqa javob ber."""
@@ -70,58 +71,110 @@ history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HISTORY_LEN))
 # Fayllar Anthropic Files API'da saqlanadi: Render'ning bepul diski server uxlaganda tozalanadi,
 # Files API'dagi fayllar esa o'chirilmaguncha turadi. Bot fayllari shu prefiks bilan ajratiladi.
 FILE_PREFIX = "jarvis__"
-KB_PREFIX = FILE_PREFIX + "kb_"  # repo'dagi knowledge/ papkasidan kelgan fayllar
 KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge")
 _files_cache: list | None = None
 
 
-async def sync_knowledge(files: list) -> list:
-    """knowledge/ papkasini Files API bilan moslaydi: yangi fayllarni yuklaydi, olib tashlanganlarini o'chiradi.
+def display_name(f) -> str:
+    return f.filename.removeprefix(FILE_PREFIX)
 
-    Fayl nomiga mazmun xeshi qo'shiladi, shuning uchun o'zgargan fayl qayta yuklanadi."""
-    wanted = {}
+
+# --- Doimiy bilim bazasi (knowledge/ papkasi) ---
+# Hujjatlar ko'p (~1 mln belgi), har savolda hammasini yuborish qimmat. Shuning uchun:
+# 1) arzon Haiku modeli katalogdan savolga mos 1-4 hujjatni tanlaydi;
+# 2) asosiy modelga faqat shu hujjatlar (kerak bo'lsa eng mos qismlari) yuboriladi.
+ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "claude-haiku-5-5")
+KB_MAX_CHARS = 60_000  # bitta savolga yuboriladigan hujjat matni chegarasi
+KB_DOC_MAX = 30_000  # bitta hujjatdan olinadigan eng ko'p matn
+
+
+def _strip_frontmatter(text: str) -> str:
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            return text[end + 4 :].lstrip()
+    return text
+
+
+def load_knowledge() -> tuple[dict, str]:
+    docs = {}
     if os.path.isdir(KB_DIR):
         for name in sorted(os.listdir(KB_DIR)):
-            path = os.path.join(KB_DIR, name)
-            if not os.path.isfile(path) or name.startswith("."):
-                continue
-            with open(path, "rb") as fh:
-                data = fh.read()
-            prepared = to_upload(name, data)
-            if prepared is None:
-                log.warning("knowledge/: o'qib bo'lmadi, o'tkazildi: %s", name)
-                continue
-            up_name, content, mime = prepared
-            digest = hashlib.sha256(content).hexdigest()[:8]
-            wanted[f"{KB_PREFIX}{digest}_{up_name}"] = (content, mime)
-
-    kept = []
-    for f in files:
-        if f.filename.startswith(KB_PREFIX) and f.filename not in wanted:
-            await client.files.delete(f.id)
-            log.info("knowledge/: o'chirildi %s", f.filename)
-        else:
-            kept.append(f)
-    have = {f.filename for f in kept}
-    for fname, (content, mime) in wanted.items():
-        if fname not in have:
-            kept.append(await client.files.upload(file=(fname, content, mime)))
-            log.info("knowledge/: yuklandi %s", fname)
-    return kept
+            if name.endswith((".md", ".txt", ".csv")):
+                with open(os.path.join(KB_DIR, name), encoding="utf-8", errors="replace") as fh:
+                    docs[name] = _strip_frontmatter(fh.read())
+    lines = []
+    for name, text in docs.items():
+        preview = " ".join(text[:400].split())[:250]
+        lines.append(f"- {name} ({len(text) // 1000 + 1}k belgi): {preview}")
+    return docs, "\n".join(lines)
 
 
-def display_name(f) -> str:
-    name = f.filename.removeprefix(FILE_PREFIX)
-    if f.filename.startswith(KB_PREFIX):
-        name = name.removeprefix("kb_").split("_", 1)[-1] + " (doimiy)"
-    return name
+KB_DOCS, KB_CATALOG = load_knowledge()
+
+
+def _stems(text: str) -> set:
+    return {w[:5] for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(w) > 2}
+
+
+def best_parts(text: str, query: str, limit: int) -> str:
+    """Katta hujjatdan savol so'zlari eng ko'p uchragan bo'laklarni oladi (asl tartibda)."""
+    if len(text) <= limit:
+        return text
+    size = 2000
+    chunks = [text[i : i + size] for i in range(0, len(text), size)]
+    q = _stems(query)
+    ranked = sorted(range(len(chunks)), key=lambda i: -len(q & _stems(chunks[i])))
+    keep, total = [], 0
+    for i in ranked:
+        if total + size > limit:
+            break
+        keep.append(i)
+        total += size
+    return "\n[...]\n".join(chunks[i] for i in sorted(keep))
+
+
+async def pick_docs(question: str) -> list[str]:
+    if not KB_DOCS:
+        return []
+    resp = await client.messages.create(
+        model=ROUTER_MODEL,
+        max_tokens=2000,
+        output_config={"effort": "low"},
+        system=[
+            {
+                "type": "text",
+                "text": "Sen hujjat tanlovchisan. Quyida maktab hujjatlari katalogi. Savolga javob topish uchun "
+                "eng kerakli 1-4 ta hujjat nomini yoz, har birini yangi qatorda, aynan katalogdagidek. "
+                "Hech qaysi hujjat kerak bo'lmasa (masalan, ssenariy yozish yoki umumiy suhbat), faqat YOQ deb yoz.\n\n"
+                "Katalog:\n" + KB_CATALOG,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": question}],
+    )
+    out = "".join(b.text for b in resp.content if b.type == "text")
+    return [n for n in KB_DOCS if n in out][:4]
+
+
+async def kb_context(question: str) -> str:
+    try:
+        names = await pick_docs(question)
+    except Exception:
+        log.exception("Hujjat tanlashda xato")
+        return ""
+    if not names:
+        return ""
+    log.info("Tanlangan hujjatlar: %s", names)
+    per_doc = min(KB_DOC_MAX, KB_MAX_CHARS // len(names))
+    parts = [f"<hujjat nomi=\"{n}\">\n{best_parts(KB_DOCS[n], question, per_doc)}\n</hujjat>" for n in names]
+    return "Maktab hujjatlaridan (savolga mos deb tanlangan):\n\n" + "\n\n".join(parts)
 
 
 async def list_files() -> list:
     global _files_cache
     if _files_cache is None:
         files = [f async for f in client.files.list() if f.filename.startswith(FILE_PREFIX)]
-        files = await sync_knowledge(files)
         files.sort(key=lambda f: f.created_at)
         _files_cache = files
     return _files_cache
@@ -260,9 +313,6 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except (IndexError, ValueError, AssertionError):
         await update.message.reply_text("Raqamni yozing, masalan: /ochir 2  (ro'yxat: /fayllar)")
         return
-    if files[idx].filename.startswith(KB_PREFIX):
-        await update.message.reply_text("Bu doimiy fayl (GitHub'dagi knowledge papkasidan). Uni o'sha yerdan olib tashlash kerak.")
-        return
     f = files.pop(idx)
     await client.files.delete(f.id)
     await update.message.reply_text(f"O'chirildi: {display_name(f)}")
@@ -336,6 +386,12 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) 
     convo = list(msgs)
     while convo and convo[0]["role"] != "user":
         convo.pop(0)
+
+    # Hujjat parchalari faqat joriy savolga qo'shiladi, tarixda saqlanmaydi (arzonroq)
+    recent = " ".join(m["content"] for m in convo[-5:] if m["role"] == "user")
+    context_text = await kb_context(recent)
+    if context_text:
+        convo[-1] = {"role": "user", "content": f"{context_text}\n\nSavol: {text}"}
 
     try:
         resp = await client.messages.create(
