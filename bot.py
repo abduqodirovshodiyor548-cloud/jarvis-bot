@@ -70,14 +70,60 @@ history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HISTORY_LEN))
 # Fayllar Anthropic Files API'da saqlanadi: Render'ning bepul diski server uxlaganda tozalanadi,
 # Files API'dagi fayllar esa o'chirilmaguncha turadi. Bot fayllari shu prefiks bilan ajratiladi.
 FILE_PREFIX = "jarvis__"
+KB_PREFIX = FILE_PREFIX + "kb_"  # repo'dagi knowledge/ papkasidan kelgan fayllar
+KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge")
 _files_cache: list | None = None
+
+
+async def sync_knowledge(files: list) -> list:
+    """knowledge/ papkasini Files API bilan moslaydi: yangi fayllarni yuklaydi, olib tashlanganlarini o'chiradi.
+
+    Fayl nomiga mazmun xeshi qo'shiladi, shuning uchun o'zgargan fayl qayta yuklanadi."""
+    wanted = {}
+    if os.path.isdir(KB_DIR):
+        for name in sorted(os.listdir(KB_DIR)):
+            path = os.path.join(KB_DIR, name)
+            if not os.path.isfile(path) or name.startswith("."):
+                continue
+            with open(path, "rb") as fh:
+                data = fh.read()
+            prepared = to_upload(name, data)
+            if prepared is None:
+                log.warning("knowledge/: o'qib bo'lmadi, o'tkazildi: %s", name)
+                continue
+            up_name, content, mime = prepared
+            digest = hashlib.sha256(content).hexdigest()[:8]
+            wanted[f"{KB_PREFIX}{digest}_{up_name}"] = (content, mime)
+
+    kept = []
+    for f in files:
+        if f.filename.startswith(KB_PREFIX) and f.filename not in wanted:
+            await client.files.delete(f.id)
+            log.info("knowledge/: o'chirildi %s", f.filename)
+        else:
+            kept.append(f)
+    have = {f.filename for f in kept}
+    for fname, (content, mime) in wanted.items():
+        if fname not in have:
+            kept.append(await client.files.upload(file=(fname, content, mime)))
+            log.info("knowledge/: yuklandi %s", fname)
+    return kept
+
+
+def display_name(f) -> str:
+    name = f.filename.removeprefix(FILE_PREFIX)
+    if f.filename.startswith(KB_PREFIX):
+        name = name.removeprefix("kb_").split("_", 1)[-1] + " (doimiy)"
+    return name
 
 
 async def list_files() -> list:
     global _files_cache
     if _files_cache is None:
-        _files_cache = [f async for f in client.files.list() if f.filename.startswith(FILE_PREFIX)]
-        _files_cache.sort(key=lambda f: f.created_at)
+        files = [f async for f in client.files.list() if f.filename.startswith(FILE_PREFIX)]
+        files = await sync_knowledge(files)
+        files.sort(key=lambda f: f.created_at)
+        _files_cache = files
     return _files_cache
 
 
@@ -200,7 +246,7 @@ async def show_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not files:
         await update.message.reply_text("Hali fayl yo'q. Menga PDF, Word yoki Excel fayl yuboring.")
         return
-    lines = [f"{i}. {f.filename.removeprefix(FILE_PREFIX)}" for i, f in enumerate(files, 1)]
+    lines = [f"{i}. {display_name(f)}" for i, f in enumerate(files, 1)]
     await update.message.reply_text("Saqlangan fayllar:\n" + "\n".join(lines))
 
 
@@ -214,9 +260,12 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except (IndexError, ValueError, AssertionError):
         await update.message.reply_text("Raqamni yozing, masalan: /ochir 2  (ro'yxat: /fayllar)")
         return
+    if files[idx].filename.startswith(KB_PREFIX):
+        await update.message.reply_text("Bu doimiy fayl (GitHub'dagi knowledge papkasidan). Uni o'sha yerdan olib tashlash kerak.")
+        return
     f = files.pop(idx)
     await client.files.delete(f.id)
-    await update.message.reply_text(f"O'chirildi: {f.filename.removeprefix(FILE_PREFIX)}")
+    await update.message.reply_text(f"O'chirildi: {display_name(f)}")
 
 
 async def files_prefix() -> list:
@@ -226,7 +275,7 @@ async def files_prefix() -> list:
         return []
     blocks = [
         {"type": "document", "source": {"type": "file", "file_id": f.id},
-         "title": f.filename.removeprefix(FILE_PREFIX)}
+         "title": display_name(f)}
         for f in files
     ]
     blocks[-1]["cache_control"] = {"type": "ephemeral"}
