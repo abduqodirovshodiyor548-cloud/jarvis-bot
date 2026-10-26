@@ -2,7 +2,9 @@
 
 Barcha maxfiy qiymatlar faqat muhit o'zgaruvchilaridan (env) o'qiladi:
   TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, ALLOWED_USER_IDS, CLAUDE_MODEL
+  WEBHOOK_URL (ixtiyoriy; Render'da RENDER_EXTERNAL_URL avtomatik ishlatiladi)
 """
+import hashlib
 import logging
 import os
 from collections import defaultdict, deque
@@ -110,7 +112,22 @@ def main() -> None:
     app.add_handler(CommandHandler("new", new_chat))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     log.info("Jarvis ishga tushdi (model: %s)", MODEL)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Render bepul Web Service'da RENDER_EXTERNAL_URL avtomatik beriladi -> webhook rejimi.
+    # Server uxlab qolsa, Telegram'dan kelgan xabar uni uyg'otadi.
+    public_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    if public_url:
+        path = hashlib.sha256(TOKEN.encode()).hexdigest()[:32]  # tokenni URL'da ochmaslik uchun
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", "10000")),
+            url_path=path,
+            webhook_url=f"{public_url.rstrip('/')}/{path}",
+            secret_token=path,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
