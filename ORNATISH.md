@@ -21,22 +21,27 @@ Bot doim yoqiq turishi kerak, shuning uchun kompyuter emas, server kerak. Ikki v
 
 | Variant | Qulayligi | Narxi (taxminiy) |
 |---|---|---|
-| **Railway** (tavsiya) | Kod yozmasdan, brauzer orqali | ~5 $/oy |
+| **Render, Background Worker** (tavsiya) | Kod yozmasdan, brauzer orqali | ~7 $/oy |
 | VPS (Hetzner, DigitalOcean, mahalliy hosting) | Terminal bilan ishlash kerak | ~4-6 $/oy |
 
-Narxlar o'zgarishi mumkin, saytlarida tekshiring.
+Narxlar o'zgarishi mumkin, saytlarida tekshiring. Render'ning bepul tarifi bu bot uchun yaramaydi: u 15 daqiqa jim tursa uxlab qoladi.
 
-## 3a. Railway orqali ishga tushirish (oson yo'l)
-1. https://github.com da yangi **private** repozitoriy oching va `bot.py`, `requirements.txt` fayllarini yuklang (`.env` faylini yuklamang).
-2. https://railway.app ga GitHub bilan kiring -> `New Project` -> `Deploy from GitHub repo` -> repozitoriyni tanlang.
-3. Loyiha ichida `Variables` bo'limiga quyidagilarni qo'shing:
+## 3a. Render orqali ishga tushirish (oson yo'l)
+1. https://render.com ga `GitHub` tugmasi bilan kiring va karta ulang.
+2. `New +` -> `Background Worker` -> `jarvis-bot` repozitoriysini tanlang (ro'yxatda bo'lmasa, `Configure account` orqali GitHub'dan ruxsat bering).
+3. Sozlamalar:
+   - Language: `Python 3`
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `python bot.py`
+   - Instance Type: `Starter`
+4. `Environment Variables` bo'limiga qo'shing:
    - `TELEGRAM_BOT_TOKEN` = BotFather bergan yangi token
    - `ANTHROPIC_API_KEY` = `sk-ant-...` kalit
    - `ALLOWED_USER_IDS` = hozircha bo'sh qoldiring
-4. Start buyrug'i `Procfile` ichida bor, alohida sozlash shart emas.
-5. Deploy tugagach, Telegram'da botga `/start` yozing. Bot sizning **ID raqamingizni** aytadi.
-6. Shu raqamni `ALLOWED_USER_IDS` ga yozing (bir nechta odam bo'lsa vergul bilan: `123,456`). Railway botni o'zi qayta ishga tushiradi.
-7. Yana `/start` yozing: "Salom, Shodiyor!" chiqsa, tayyor.
+5. `Create Background Worker` ni bosing. Logda "Jarvis ishga tushdi" chiqishini kuting.
+6. Telegram'da botga `/start` yozing. Bot sizning **ID raqamingizni** aytadi.
+7. Shu raqamni Render'da `Environment` bo'limida `ALLOWED_USER_IDS` ga yozing (bir nechta odam bo'lsa vergul bilan: `123,456`) va saqlang. Render botni qayta ishga tushiradi.
+8. Yana `/start` yozing: "Salom, Shodiyor!" chiqsa, tayyor.
 
 ## 3b. VPS orqali ishga tushirish (Ubuntu)
 ```bash
@@ -65,7 +70,7 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload && sudo systemctl enable --now jarvis
 journalctl -u jarvis -f              # loglarni ko'rish
 ```
-ID olish va cheklov qo'yish 3a dagi 5-7 qadamlar bilan bir xil (`.env` ni o'zgartirgach: `sudo systemctl restart jarvis`).
+ID olish va cheklov qo'yish 3a dagi 6-8 qadamlar bilan bir xil (`.env` ni o'zgartirgach: `sudo systemctl restart jarvis`).
 
 ## Bot qanday ishlaydi
 - Faqat `ALLOWED_USER_IDS` dagi odamlar ishlata oladi, boshqalarga "bu bot shaxsiy" deydi.
