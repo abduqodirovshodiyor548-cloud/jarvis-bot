@@ -9,6 +9,7 @@ import hashlib
 import io
 import logging
 import os
+import zipfile
 from collections import defaultdict, deque
 
 import httpx
@@ -128,7 +129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "Salom, Shodiyor! Men Jarvisman. Ssenariy, post, reklama matni yoki tahlil - nima kerak?\n"
             "/new - suhbatni yangidan boshlash\n"
-            "Fayl yuborsangiz (PDF, Word, Excel, TXT), saqlab qo'yaman va savollaringizga undan javob beraman.\n"
+            "Fayl yoki ZIP arxiv yuborsangiz (PDF, Word, Excel, TXT), saqlab qo'yaman va savollaringizga undan javob beraman.\n"
             "/fayllar - saqlangan fayllar ro'yxati\n"
             "/ochir 2 - 2-faylni o'chirish\n"
             "Ovozli xabar ham yuborsangiz bo'ladi."
@@ -150,18 +151,44 @@ async def save_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     tg_file = await doc.get_file()
     data = bytes(await tg_file.download_as_bytearray())
-    try:
-        prepared = to_upload(doc.file_name or "fayl", data)
-    except Exception:
-        log.exception("Faylni o'qib bo'lmadi")
-        prepared = None
-    if prepared is None:
-        await update.message.reply_text("Bu turdagi faylni o'qiy olmayman. PDF, DOCX, XLSX, TXT, CSV yoki MD yuboring.")
-        return
-    name, content, mime = prepared
-    meta = await client.files.upload(file=(FILE_PREFIX + name, content, mime))
-    (await list_files()).append(meta)
-    await update.message.reply_text(f"Saqlandi: {name}\nEndi bu fayl bo'yicha savol bersangiz bo'ladi.")
+    name = doc.file_name or "fayl"
+
+    if name.lower().endswith(".zip"):
+        # Papkani ZIP qilib yuborish mumkin: ichidagi har bir fayl alohida saqlanadi
+        items = []
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                base = info.filename.rsplit("/", 1)[-1]
+                if info.is_dir() or not base or base.startswith(("~$", ".")) or "__MACOSX" in info.filename:
+                    continue
+                items.append((base, zf.read(info)))
+    else:
+        items = [(name, data)]
+
+    saved, skipped = [], []
+    for item_name, item_data in items:
+        try:
+            prepared = to_upload(item_name, item_data)
+        except Exception:
+            log.exception("Faylni o'qib bo'lmadi: %s", item_name)
+            prepared = None
+        if prepared is None:
+            skipped.append(item_name)
+            continue
+        up_name, content, mime = prepared
+        meta = await client.files.upload(file=(FILE_PREFIX + up_name, content, mime))
+        (await list_files()).append(meta)
+        saved.append(up_name)
+
+    lines = []
+    if saved:
+        lines.append(f"Saqlandi ({len(saved)}): " + ", ".join(saved))
+    if skipped:
+        lines.append(f"O'qib bo'lmadi ({len(skipped)}): " + ", ".join(skipped))
+        lines.append("Qabul qilinadigan turlar: PDF, DOCX, XLSX, TXT, CSV, MD.")
+    if saved:
+        lines.append("Endi shu fayllar bo'yicha savol bersangiz bo'ladi.")
+    await update.message.reply_text("\n".join(lines) or "ZIP ichida fayl topilmadi.")
 
 
 async def show_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
