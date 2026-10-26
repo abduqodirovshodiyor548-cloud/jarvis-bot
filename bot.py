@@ -5,6 +5,7 @@ Barcha maxfiy qiymatlar faqat muhit o'zgaruvchilaridan (env) o'qiladi:
   WEBHOOK_URL (ixtiyoriy; Render'da RENDER_EXTERNAL_URL avtomatik ishlatiladi)
 """
 import hashlib
+import io
 import logging
 import os
 from collections import defaultdict, deque
@@ -52,10 +53,57 @@ Post va reklama matni: 3 variant - muammo-yechim, natija va raqamlar, ota-ona hi
 Tahlil: CPL, lid -> qabul konversiyasi, CAC, kanallar bo'yicha taqqoslash.
 Tuzilma: asosiy xulosa 2-3 gapda; nima ishlayapti va nima ishlamayapti; keyingi haftaga 3 ta aniq harakat.
 
-Telegram'da o'qish qulay bo'lsin: jadval o'rniga raqamlangan bandlar ishlat, markdown belgilarini (**, ##) ishlatma."""
+Telegram'da o'qish qulay bo'lsin: jadval o'rniga raqamlangan bandlar ishlat, markdown belgilarini (**, ##) ishlatma.
+
+Shodiyor yuklagan fayllar suhbat boshida beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
+va qaysi fayldan olganingni ayt. Faylda javob bo'lmasa, "fayllarda topilmadi" deb ochiq ayt."""
 
 client = AsyncAnthropic()  # ANTHROPIC_API_KEY env'dan o'qiladi
 history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HISTORY_LEN))
+
+# Fayllar Anthropic Files API'da saqlanadi: Render'ning bepul diski server uxlaganda tozalanadi,
+# Files API'dagi fayllar esa o'chirilmaguncha turadi. Bot fayllari shu prefiks bilan ajratiladi.
+FILE_PREFIX = "jarvis__"
+_files_cache: list | None = None
+
+
+async def list_files() -> list:
+    global _files_cache
+    if _files_cache is None:
+        _files_cache = [f async for f in client.files.list() if f.filename.startswith(FILE_PREFIX)]
+        _files_cache.sort(key=lambda f: f.created_at)
+    return _files_cache
+
+
+def to_upload(name: str, data: bytes) -> tuple[str, bytes, str] | None:
+    """Telegram faylini Files API uchun (nom, baytlar, mime) ko'rinishiga keltiradi."""
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext == "pdf":
+        return name, data, "application/pdf"
+    if ext in ("txt", "md", "csv"):
+        text = data.decode("utf-8", errors="replace")
+    elif ext == "docx":
+        from docx import Document
+
+        doc = Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            parts += ["\t".join(c.text for c in row.cells) for row in table.rows]
+        text = "\n".join(parts)
+    elif ext == "xlsx":
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        parts = []
+        for ws in wb.worksheets:
+            parts.append(f"## {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                if any(v is not None for v in row):
+                    parts.append("\t".join("" if v is None else str(v) for v in row))
+        text = "\n".join(parts)
+    else:
+        return None
+    return name.rsplit(".", 1)[0] + ".txt", text.encode("utf-8"), "text/plain"
 
 
 async def allowed(update: Update) -> bool:
@@ -76,7 +124,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await allowed(update):
         await update.message.reply_text(
             "Salom, Shodiyor! Men Jarvisman. Ssenariy, post, reklama matni yoki tahlil - nima kerak?\n"
-            "/new - suhbatni yangidan boshlash"
+            "/new - suhbatni yangidan boshlash\n"
+            "Fayl yuborsangiz (PDF, Word, Excel, TXT), saqlab qo'yaman va savollaringizga undan javob beraman.\n"
+            "/fayllar - saqlangan fayllar ro'yxati\n"
+            "/ochir 2 - 2-faylni o'chirish"
         )
 
 
@@ -84,6 +135,73 @@ async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await allowed(update):
         history.pop(update.effective_chat.id, None)
         await update.message.reply_text("Yangi suhbat boshlandi.")
+
+
+async def save_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await allowed(update):
+        return
+    doc = update.message.document
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("Fayl 20 MB dan katta, Telegram botlari buni yuklab ololmaydi.")
+        return
+    tg_file = await doc.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+    try:
+        prepared = to_upload(doc.file_name or "fayl", data)
+    except Exception:
+        log.exception("Faylni o'qib bo'lmadi")
+        prepared = None
+    if prepared is None:
+        await update.message.reply_text("Bu turdagi faylni o'qiy olmayman. PDF, DOCX, XLSX, TXT, CSV yoki MD yuboring.")
+        return
+    name, content, mime = prepared
+    meta = await client.files.upload(file=(FILE_PREFIX + name, content, mime))
+    (await list_files()).append(meta)
+    await update.message.reply_text(f"Saqlandi: {name}\nEndi bu fayl bo'yicha savol bersangiz bo'ladi.")
+
+
+async def show_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await allowed(update):
+        return
+    files = await list_files()
+    if not files:
+        await update.message.reply_text("Hali fayl yo'q. Menga PDF, Word yoki Excel fayl yuboring.")
+        return
+    lines = [f"{i}. {f.filename.removeprefix(FILE_PREFIX)}" for i, f in enumerate(files, 1)]
+    await update.message.reply_text("Saqlangan fayllar:\n" + "\n".join(lines))
+
+
+async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await allowed(update):
+        return
+    files = await list_files()
+    try:
+        idx = int(context.args[0]) - 1
+        assert 0 <= idx < len(files)
+    except (IndexError, ValueError, AssertionError):
+        await update.message.reply_text("Raqamni yozing, masalan: /ochir 2  (ro'yxat: /fayllar)")
+        return
+    f = files.pop(idx)
+    await client.files.delete(f.id)
+    await update.message.reply_text(f"O'chirildi: {f.filename.removeprefix(FILE_PREFIX)}")
+
+
+async def files_prefix() -> list:
+    """Fayllarni suhbat boshiga qo'yadi; kesh belgisi qayta yuborishni arzonlashtiradi."""
+    files = await list_files()
+    if not files:
+        return []
+    blocks = [
+        {"type": "document", "source": {"type": "file", "file_id": f.id},
+         "title": f.filename.removeprefix(FILE_PREFIX)}
+        for f in files
+    ]
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    blocks.append({"type": "text", "text": "Bular men yuklagan fayllar. Kerak bo'lganda shulardan foydalan."})
+    return [
+        {"role": "user", "content": blocks},
+        {"role": "assistant", "content": "Fayllarni ko'rdim, savolingizni kutaman."},
+    ]
 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,7 +219,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         resp = await client.messages.create(
-            model=MODEL, max_tokens=4000, system=SYSTEM_PROMPT, messages=convo
+            model=MODEL, max_tokens=4000, system=SYSTEM_PROMPT, messages=await files_prefix() + convo
         )
         answer = "".join(b.text for b in resp.content if b.type == "text").strip() or "(bo'sh javob)"
     except Exception:
@@ -119,6 +237,9 @@ def main() -> None:
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_chat))
+    app.add_handler(CommandHandler("fayllar", show_files))
+    app.add_handler(CommandHandler("ochir", delete_file))
+    app.add_handler(MessageHandler(filters.Document.ALL, save_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     log.info("Jarvis ishga tushdi (model: %s)", MODEL)
 
