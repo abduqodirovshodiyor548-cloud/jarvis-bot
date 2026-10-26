@@ -15,6 +15,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # so'rov URL'larida token bor, logga chiqmasin
 log = logging.getLogger("jarvis")
 
 def _env(name: str) -> str:
