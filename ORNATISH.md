@@ -33,7 +33,7 @@ Narxlar o'zgarishi mumkin, saytlarida tekshiring.
    - `TELEGRAM_BOT_TOKEN` = BotFather bergan yangi token
    - `ANTHROPIC_API_KEY` = `sk-ant-...` kalit
    - `ALLOWED_USER_IDS` = hozircha bo'sh qoldiring
-4. `Settings` -> `Start Command`: `python bot.py`
+4. Start buyrug'i `Procfile` ichida bor, alohida sozlash shart emas.
 5. Deploy tugagach, Telegram'da botga `/start` yozing. Bot sizning **ID raqamingizni** aytadi.
 6. Shu raqamni `ALLOWED_USER_IDS` ga yozing (bir nechta odam bo'lsa vergul bilan: `123,456`). Railway botni o'zi qayta ishga tushiradi.
 7. Yana `/start` yozing: "Salom, Shodiyor!" chiqsa, tayyor.
