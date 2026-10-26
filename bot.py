@@ -17,7 +17,15 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger("jarvis")
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+def _env(name: str) -> str:
+    value = os.environ.get(name, "").strip().strip('"').strip("'")
+    if not value:
+        raise SystemExit(f"XATO: {name} muhit o'zgaruvchisi kiritilmagan (Render -> Environment).")
+    return value
+
+
+TOKEN = _env("TELEGRAM_BOT_TOKEN")
+os.environ["ANTHROPIC_API_KEY"] = _env("ANTHROPIC_API_KEY")
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x}
 HISTORY_LEN = 20  # har bir chat uchun eslab qolinadigan oxirgi xabarlar soni
