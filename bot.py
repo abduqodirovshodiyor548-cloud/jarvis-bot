@@ -9,6 +9,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import zipfile
 from collections import defaultdict, deque
 
@@ -59,8 +60,7 @@ Tuzilma: asosiy xulosa 2-3 gapda; nima ishlayapti va nima ishlamayapti; keyingi 
 
 Telegram'da o'qish qulay bo'lsin: jadval o'rniga raqamlangan bandlar ishlat, markdown belgilarini (**, ##) ishlatma.
 
-Maktab hujjatlaridan savolga mos parchalar savol bilan birga <hujjat> teglarida beriladi,
-Shodiyor Telegram'da yuklagan fayllar esa suhbat boshida beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
+Maktab hujjatlaridan savolga mos parchalar va fayllar savol bilan birga beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
 va qaysi fayldan olganingni ayt. Faylda javob bo'lmasa, "fayllarda topilmadi" deb ochiq ayt.
 Faqat so'ralgan aniq javobni ber (raqam, narx, ism, sana yoki kerakli band). Faylni yoki uning katta qismini
 ko'chirib berma, "faylga qarang" dema: o'zing topib, qisqa javob ber."""
@@ -134,8 +134,20 @@ def best_parts(text: str, query: str, limit: int) -> str:
     return "\n[...]\n".join(chunks[i] for i in sorted(keep))
 
 
-async def pick_docs(question: str) -> list[str]:
-    if not KB_DOCS:
+async def catalog() -> tuple[str, dict]:
+    """Repo'dagi hujjatlar va Telegram orqali yuklangan fayllar uchun umumiy katalog."""
+    entries = {name: ("kb", name) for name in KB_DOCS}
+    lines = [KB_CATALOG] if KB_CATALOG else []
+    for f in await list_files():
+        name = display_name(f)
+        entries[name] = ("file", f.id)
+        lines.append(f"- {name} (Telegram orqali yuklangan)")
+    return "\n".join(lines), entries
+
+
+async def pick_docs(question: str) -> list[tuple[str, tuple]]:
+    cat, entries = await catalog()
+    if not entries:
         return []
     resp = await client.messages.create(
         model=ROUTER_MODEL,
@@ -147,28 +159,36 @@ async def pick_docs(question: str) -> list[str]:
                 "text": "Sen hujjat tanlovchisan. Quyida maktab hujjatlari katalogi. Savolga javob topish uchun "
                 "eng kerakli 1-4 ta hujjat nomini yoz, har birini yangi qatorda, aynan katalogdagidek. "
                 "Hech qaysi hujjat kerak bo'lmasa (masalan, ssenariy yozish yoki umumiy suhbat), faqat YOQ deb yoz.\n\n"
-                "Katalog:\n" + KB_CATALOG,
+                "Katalog:\n" + cat,
                 "cache_control": {"type": "ephemeral"},
             }
         ],
         messages=[{"role": "user", "content": question}],
     )
     out = "".join(b.text for b in resp.content if b.type == "text")
-    return [n for n in KB_DOCS if n in out][:4]
+    chosen = [line.strip().lstrip("-*0123456789. ").strip("`\"' ") for line in out.splitlines()]
+    return [(n, entries[n]) for n in dict.fromkeys(chosen) if n in entries][:4]
 
 
-async def kb_context(question: str) -> str:
+async def kb_context(question: str) -> list:
+    """Savolga mos hujjatlarni content bloklari ko'rinishida qaytaradi."""
     try:
-        names = await pick_docs(question)
+        picked = await pick_docs(question)
     except Exception:
         log.exception("Hujjat tanlashda xato")
-        return ""
-    if not names:
-        return ""
-    log.info("Tanlangan hujjatlar: %s", names)
-    per_doc = min(KB_DOC_MAX, KB_MAX_CHARS // len(names))
-    parts = [f"<hujjat nomi=\"{n}\">\n{best_parts(KB_DOCS[n], question, per_doc)}\n</hujjat>" for n in names]
-    return "Maktab hujjatlaridan (savolga mos deb tanlangan):\n\n" + "\n\n".join(parts)
+        return []
+    if not picked:
+        return []
+    log.info("Tanlangan hujjatlar: %s", [n for n, _ in picked])
+    per_doc = min(KB_DOC_MAX, KB_MAX_CHARS // len(picked))
+    blocks = [{"type": "text", "text": "Maktab hujjatlaridan (savolga mos deb tanlangan):"}]
+    for name, (kind, ref) in picked:
+        if kind == "kb":
+            text = best_parts(KB_DOCS[ref], question, per_doc)
+            blocks.append({"type": "text", "text": f"<hujjat nomi=\"{name}\">\n{text}\n</hujjat>"})
+        else:
+            blocks.append({"type": "document", "source": {"type": "file", "file_id": ref}, "title": name})
+    return blocks
 
 
 async def list_files() -> list:
@@ -208,6 +228,8 @@ def to_upload(name: str, data: bytes) -> tuple[str, bytes, str] | None:
         text = "\n".join(parts)
     else:
         return None
+    text = re.sub(r"[ \t\u00a0]{2,}", " ", text.replace("\x00", ""))
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return name.rsplit(".", 1)[0] + ".txt", text.encode("utf-8"), "text/plain"
 
 
@@ -318,24 +340,6 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"O'chirildi: {display_name(f)}")
 
 
-async def files_prefix() -> list:
-    """Fayllarni suhbat boshiga qo'yadi; kesh belgisi qayta yuborishni arzonlashtiradi."""
-    files = await list_files()
-    if not files:
-        return []
-    blocks = [
-        {"type": "document", "source": {"type": "file", "file_id": f.id},
-         "title": display_name(f)}
-        for f in files
-    ]
-    blocks[-1]["cache_control"] = {"type": "ephemeral"}
-    blocks.append({"type": "text", "text": "Bular men yuklagan fayllar. Kerak bo'lganda shulardan foydalan."})
-    return [
-        {"role": "user", "content": blocks},
-        {"role": "assistant", "content": "Fayllarni ko'rdim, savolingizni kutaman."},
-    ]
-
-
 async def transcribe(audio: bytes) -> str:
     """Ovozni Groq Whisper orqali matnga aylantiradi."""
     async with httpx.AsyncClient(timeout=60) as http:
@@ -389,13 +393,13 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) 
 
     # Hujjat parchalari faqat joriy savolga qo'shiladi, tarixda saqlanmaydi (arzonroq)
     recent = " ".join(m["content"] for m in convo[-5:] if m["role"] == "user")
-    context_text = await kb_context(recent)
-    if context_text:
-        convo[-1] = {"role": "user", "content": f"{context_text}\n\nSavol: {text}"}
+    context_blocks = await kb_context(recent)
+    if context_blocks:
+        convo[-1] = {"role": "user", "content": context_blocks + [{"type": "text", "text": f"Savol: {text}"}]}
 
     try:
         resp = await client.messages.create(
-            model=MODEL, max_tokens=4000, system=SYSTEM_PROMPT, messages=await files_prefix() + convo
+            model=MODEL, max_tokens=4000, system=SYSTEM_PROMPT, messages=convo
         )
         answer = "".join(b.text for b in resp.content if b.type == "text").strip() or "(bo'sh javob)"
     except Exception:
