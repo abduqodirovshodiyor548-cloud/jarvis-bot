@@ -3,6 +3,7 @@
 Barcha maxfiy qiymatlar faqat muhit o'zgaruvchilaridan (env) o'qiladi:
   TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, ALLOWED_USER_IDS, CLAUDE_MODEL
   WEBHOOK_URL (ixtiyoriy; Render'da RENDER_EXTERNAL_URL avtomatik ishlatiladi)
+  GROQ_API_KEY (ixtiyoriy; ovozli xabarlarni matnga aylantirish uchun)
 """
 import hashlib
 import io
@@ -10,6 +11,7 @@ import logging
 import os
 from collections import defaultdict, deque
 
+import httpx
 from anthropic import AsyncAnthropic
 from telegram import Update
 from telegram.constants import ChatAction
@@ -30,6 +32,7 @@ TOKEN = _env("TELEGRAM_BOT_TOKEN")
 os.environ["ANTHROPIC_API_KEY"] = _env("ANTHROPIC_API_KEY")
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x}
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 HISTORY_LEN = 20  # har bir chat uchun eslab qolinadigan oxirgi xabarlar soni
 
 SYSTEM_PROMPT = """Sen Jarvis - Shodiyorning marketing yordamchisisan.
@@ -127,7 +130,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/new - suhbatni yangidan boshlash\n"
             "Fayl yuborsangiz (PDF, Word, Excel, TXT), saqlab qo'yaman va savollaringizga undan javob beraman.\n"
             "/fayllar - saqlangan fayllar ro'yxati\n"
-            "/ochir 2 - 2-faylni o'chirish"
+            "/ochir 2 - 2-faylni o'chirish\n"
+            "Ovozli xabar ham yuborsangiz bo'ladi."
         )
 
 
@@ -204,12 +208,50 @@ async def files_prefix() -> list:
     ]
 
 
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def transcribe(audio: bytes) -> str:
+    """Ovozni Groq Whisper orqali matnga aylantiradi."""
+    async with httpx.AsyncClient(timeout=60) as http:
+        r = await http.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("voice.ogg", audio, "audio/ogg")},
+            data={"model": "whisper-large-v3", "language": "uz", "response_format": "json"},
+        )
+        r.raise_for_status()
+        return r.json().get("text", "").strip()
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await allowed(update):
         return
+    if not GROQ_API_KEY:
+        await update.message.reply_text("Ovozni o'qish uchun Render'ga GROQ_API_KEY qo'shilishi kerak.")
+        return
+    voice = update.message.voice or update.message.audio
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    try:
+        audio = bytes(await (await voice.get_file()).download_as_bytearray())
+        text = await transcribe(audio)
+    except Exception:
+        log.exception("Ovozni matnga aylantirib bo'lmadi")
+        await update.message.reply_text("Ovozni tushuna olmadim, qayta yuboring yoki matn bilan yozing.")
+        return
+    if not text:
+        await update.message.reply_text("Ovozda gap eshitilmadi.")
+        return
+    await update.message.reply_text(f"Eshitdim: {text}")
+    await answer(update, context, text)
+
+
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await allowed(update):
+        await answer(update, context, update.message.text)
+
+
+async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     chat_id = update.effective_chat.id
     msgs = history[chat_id]
-    msgs.append({"role": "user", "content": update.message.text})
+    msgs.append({"role": "user", "content": text})
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
     # Tarix deque bilan qirqilganda birinchi xabar "user" bo'lishi shart
@@ -240,6 +282,7 @@ def main() -> None:
     app.add_handler(CommandHandler("fayllar", show_files))
     app.add_handler(CommandHandler("ochir", delete_file))
     app.add_handler(MessageHandler(filters.Document.ALL, save_document))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     log.info("Jarvis ishga tushdi (model: %s)", MODEL)
 

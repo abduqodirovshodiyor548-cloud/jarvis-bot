@@ -73,5 +73,6 @@ ID olish va cheklov qo'yish 3a dagi 6-8 qadamlar bilan bir xil (`.env` ni o'zgar
 - Fayl yuborsangiz (PDF, DOCX, XLSX, TXT, CSV, MD, 20 MB gacha), Anthropic serverida saqlaydi va savollarga shu fayllardan javob beradi. Server uxlasa ham fayllar o'chmaydi.
 - `/fayllar` - saqlangan fayllar ro'yxati, `/ochir 2` - 2-faylni o'chirish.
 - Diqqat: har bir savolda barcha fayllar modelga qayta yuboriladi. Fayl qancha ko'p va katta bo'lsa, javob shuncha qimmatlashadi. Keraksiz fayllarni o'chirib turing.
-- Rasm va ovozli xabarni hozircha tushunmaydi.
+- Ovozli xabarni tushunadi, agar Render'da `GROQ_API_KEY` bo'lsa (kalit: https://console.groq.com -> `API Keys` -> `Create API Key`, bepul tarif). Bot avval "Eshitdim: ..." deb matnni ko'rsatadi, keyin javob beradi.
+- Rasmni hozircha tushunmaydi.
 - Model: `claude-sonnet-5-5`. Arzonroq kerak bo'lsa `CLAUDE_MODEL=claude-haiku-5-5`, kuchliroq kerak bo'lsa `claude-opus-5-5`.
