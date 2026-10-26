@@ -60,7 +60,9 @@ Tuzilma: asosiy xulosa 2-3 gapda; nima ishlayapti va nima ishlamayapti; keyingi 
 Telegram'da o'qish qulay bo'lsin: jadval o'rniga raqamlangan bandlar ishlat, markdown belgilarini (**, ##) ishlatma.
 
 Shodiyor yuklagan fayllar suhbat boshida beriladi. Savol ularga tegishli bo'lsa, javobni shu fayllardan ol
-va qaysi fayldan olganingni ayt. Faylda javob bo'lmasa, "fayllarda topilmadi" deb ochiq ayt."""
+va qaysi fayldan olganingni ayt. Faylda javob bo'lmasa, "fayllarda topilmadi" deb ochiq ayt.
+Faqat so'ralgan aniq javobni ber (raqam, narx, ism, sana yoki kerakli band). Faylni yoki uning katta qismini
+ko'chirib berma, "faylga qarang" dema: o'zing topib, qisqa javob ber."""
 
 client = AsyncAnthropic()  # ANTHROPIC_API_KEY env'dan o'qiladi
 history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HISTORY_LEN))
